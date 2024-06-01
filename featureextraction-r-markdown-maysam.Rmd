@@ -2,7 +2,10 @@
 title: "feature extraction maysam"
 author: "maysam rashidi"
 date: "2024-06-01"
-output: html_document
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
 ---
 
 ```{r  }
