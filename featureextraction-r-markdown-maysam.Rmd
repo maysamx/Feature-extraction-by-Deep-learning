@@ -1,0 +1,845 @@
+---
+title: "feature extraction maysam"
+author: "maysam rashidi"
+date: "2024-06-01"
+output: html_document
+---
+
+```{r  }
+library(data.table)
+library(keras)
+library(dplyr)
+library(quantmod)
+library(zoo)
+library(TTR)
+# Attempt to load the CSV file with a suspected delimiter
+data <- read.csv("titlonmoyin.csv", header = TRUE, sep = "c")  # If "c" is suspected as part of the delimiter
+
+# try to see if there's a complex delimiter like "c\" or similar
+#data <- read.csv("titlonmoyin.csv", header = TRUE, sep = 'c')  # If 'c"' is the delimiter
+
+# Check the structure of the data to see if columns are properly separated
+str(data)
+
+
+# Replace commas with dots and convert to numeric where needed
+data <- data %>%
+  mutate(across(c(SMB, HML, LIQ, MOM, Close), ~as.numeric(gsub(",", ".", .x))),
+         Date = as.Date(Date, format = "%Y-%m-%d"))  # Convert Date to Date type
+
+
+#write.csv(data, "titlonmoyinready.csv", row.names = FALSE)
+data <- read.csv("titlonmoyinready.csv")
+
+str(data,50)
+summary(data,50)
+
+
+```
+
+ 
+
+```{r  }
+# Load necessary libraries
+library(quantmod)
+stock_data_xts <- xts(data[, -1], order.by = as.Date(data$Date))
+
+
+# Calculate Moving Averages
+data$MA5 <- SMA(stock_data_xts$Close, n=5)
+data$MA10 <- SMA(stock_data_xts$Close, n=10)
+data$MA20 <- SMA(stock_data_xts$Close, n=20)
+
+
+# Save data frame to a CSV file
+#write.csv(data, "700mb.csv", row.names = FALSE)
+# Load data frame from the CSV file
+#data <- read.csv("700mb.csv")
+
+
+
+ #Remove rows with NAs in MA5 and MA10
+data <- data[!is.na(data$MA5) & !is.na(data$MA10), ]
+
+
+data$Close <- as.numeric(as.character(data$Close))
+data$MA5 <- as.numeric(as.character(data$MA5))
+# Check for unique values in 'Close' and 'MA5' columns
+print(head(unique(data$Close), 10))
+print(head(unique(data$MA5), 10))
+
+
+# Now calculate BIAS 
+data$BIAS5 <- (data$Close - data$MA5) / data$MA5 * 100
+data$BIAS10 <- (data$Close - data$MA10) / data$MA10 * 100
+
+# Save data frame to a CSV file
+#write.csv(data, "700mb.csv", row.names = FALSE)
+
+
+library(zoo)
+library(data.table)
+
+calculate_RSI <- function(prices, n) {
+  # Calculate daily changes in price
+  deltas <- diff(prices)
+  
+  # Separate gains and losses
+  gains <- pmax(deltas, 0)
+  losses <- pmax(-deltas, 0)
+  
+  # Calculate the average gains and losses using a rolling mean
+  avg_gains <- rollapply(gains, n, mean, fill = NA, align = 'right')
+  avg_losses <- rollapply(losses, n, mean, fill = NA, align = 'right')
+  
+  # Calculate the RS (Relative Strength)
+  rs <- avg_gains / avg_losses
+  
+  # Calculate the RSI (Relative Strength Index)
+  rsi <- 100 - (100 / (1 + rs))
+  
+  return(rsi)
+}
+
+#  
+# Convert 'Close' column to numeric if it's not
+#data[, Close := as.numeric(as.character(Close))]
+
+# Calculate RSI for 6 periods
+
+
+rsi6_values <- calculate_RSI(data$Close, 6)
+# Prepend NA to the rsi6_values to match the length of the data  
+rsi6_values <- c(NA, rsi6_values)
+
+# Now the lengths match and you can assign it to the data table
+data$RSI6 <- rsi6_values
+
+# Do the same for RSI12 if needed
+rsi12_values <- c(NA, calculate_RSI(data$Close, 12))
+data$RSI12 <- rsi12_values
+
+
+# Save data frame to a CSV file
+#write.csv(data, "700mb.csv", row.names = FALSE)
+
+
+
+
+calculate_stoch <- function(high, low, close, n, smoothK, smoothD) {
+  # Calculate %K
+  lowest_low <- rollapply(low, n, min, fill = NA, align = 'right')
+  highest_high <- rollapply(high, n, max, fill = NA, align = 'right')
+  fastK <- (close - lowest_low) / (highest_high - lowest_low) * 100
+  
+  # Smooth %K to get the slow %K
+  slowK <- rollapply(fastK, smoothK, mean, fill = NA, align = 'right')
+  
+  # Calculate %D as a moving average of %K
+  fastD <- rollapply(slowK, smoothD, mean, fill = NA, align = 'right')
+  
+  return(list(fastK = fastK, fastD = fastD))
+}
+
+#  
+high_prices <- data$High
+low_prices <- data$Low
+close_prices <- data$Close
+
+# Set the parameters
+n <- 14       # The look-back period for %K
+smoothK <- 3  # The smoothing period for %K
+smoothD <- 3  # The smoothing period for %D
+
+# Calculate stochastic oscillator
+stoch_values <- calculate_stoch(high_prices, low_prices, close_prices, n, smoothK, smoothD)
+
+# Add the stochastic values to  data frame
+data$Stoch_K <- stoch_values$fastK
+data$Stoch_D <- stoch_values$fastD
+
+# Save data frame to a CSV file
+#write.csv(data, "700mb.csv", row.names = FALSE)
+
+
+#load the TTR package 
+library(TTR)
+
+# Convert the 'Close' column of  data to numeric (if it's not already)
+data$Close <- as.numeric(as.character(data$Close))
+
+# Calculate MACD
+macd_results <- MACD(x = data$Close)
+print(head(macd_results,30) ) # This will show the output structure
+print(class(macd_results)) # Check the class/type of macd_results
+data$MACD <- macd_results[, 1]   
+data$Signal <- macd_results[, 2]   
+
+
+
+
+# Calculate Williams
+calculate_WPR <- function(high, low, close, n) {
+  highest_high <- rollapply(high, n, max, fill = NA, align = 'right')
+  lowest_low <- rollapply(low, n, min, fill = NA, align = 'right')
+  wpr <- ((highest_high - close) / (highest_high - lowest_low)) * -100
+  return(wpr)
+}
+
+# 
+library(zoo)  # for rollapply
+
+data$WPR <- calculate_WPR(data$High, data$Low, data$Close, 12)
+
+
+# Calculate Volatility
+
+calculate_volatility <- function(series, n) {
+  # Calculate the percentage change
+  pct_change <- diff(log(series)) * 100
+  
+  # Calculate the rolling standard deviation (volatility)
+  vol <- rollapply(pct_change, width = n, FUN = sd, fill = NA, align = 'right')
+  
+  return(vol)
+}
+
+#data <- data[, !names(data) %in% c("Volume", "VOL1" ,"VOL2")]
+
+colnames(data)
+
+library(zoo)  # for rollapply
+
+# Specify numeric columns
+numeric_columns <- c("Open", "High", "Low", "Close","OfficialVolume")
+
+
+# Convert 'Close' and 'Volume' to numeric 
+data$Close <- as.numeric(as.character(data$Close))
+data$Volume <- as.numeric(as.character(data$Volume))
+
+
+# Prepend NA to the volatility vectors
+vol1_values <- c(NA, calculate_volatility(data$Close, 10))
+vol2_values <- c(NA, calculate_volatility(data$Volume, 10))
+
+# Now assign the values to the data table
+data$VOL1 <- vol1_values
+data$VOL2 <- vol2_values
+
+# Calculate Differential Technical Indicators (ΔMA5: the change in MA5 from one period to the next)
+# Add NA to the beginning to align lengths
+data$Delta_MA5 <- c(NA, diff(data$MA5, lag = 1))
+
+
+colnames(data)
+# Corrected list of columns to check for NAs
+columns_to_check <- c("MA5", "MA10", "MA20", "BIAS5", "BIAS10", "RSI6", "RSI12", "Stoch_K", "Stoch_D", "MACD", "Signal", "WPR", "VOL1", "VOL2", "Delta_MA5")
+
+# Subset the dataframe to keep only rows that are complete cases in the specified columns
+data <- data[complete.cases(data[, columns_to_check]), ]
+
+# Check the structure of the cleaned data
+#str(data,10)
+
+#unique(data$CompanyId)
+#summary(data)
+#typeof(data$Date)
+
+
+
+# Defining the columns to keep
+# Updated list of columns to keep
+columns_to_keep <- c("Date", "CompanyId", "Close","SMB", "HML", "LIQ", "MOM", "MA5", "MA10", "MA20", "BIAS5", "BIAS10", "RSI6", "RSI12", 
+                     "Stoch_K", "Stoch_D", "MACD", "Signal", "WPR", "VOL1", "VOL2", "Delta_MA5" )
+
+library(dplyr)
+
+# Subset the dataframe to include only specified columns
+data <- select(data, all_of(columns_to_keep))
+
+# Optionally, check the structure of the new subset
+print(head(unique(data$CompanyId), 10))
+summary(data)
+print(typeof(data$Date))
+str(head(data, 10))
+
+
+
+```
+
+ 
+
+```{r  }
+data <- read.csv("titlonmoyinreadyfinalsubset 17.5.2024.csv")
+
+# Load necessary libraries
+library(quantmod)
+library(keras)
+library(data.table)
+library(keras)
+library(tensorflow)
+
+# Remove rows with any NA values from cnn_output dataframe
+data <- na.omit(data)
+
+
+# Select the columns to be used as features
+features <- data[, c("Close","SMB", "HML", "LIQ", "MOM", "MA5", "MA10", "MA20", "BIAS5", "BIAS10", "RSI6", "RSI12", 
+                     "Stoch_K", "Stoch_D", "MACD", "Signal", "WPR", "VOL1", "VOL2", "Delta_MA5")]
+
+# Normalize the features
+# We will perform min-max scaling here. You can also use other methods like Z-score standardization
+min_vals <- sapply(features, min, na.rm = TRUE)
+max_vals <- sapply(features, max, na.rm = TRUE)
+scaled_features <- as.data.table(scale(features, center = min_vals, scale = max_vals - min_vals))
+
+# Prepare the data for the CNN
+#  use a sequence length of 'n' days for each prediction
+sequence_length <- 10 #   using the past 10 days to predict the next day
+n_features <- ncol(features)
+n_samples <- nrow(features) - sequence_length + 1
+
+# Initialize an array to hold the reshaped data
+cnn_input <- array(NA, dim = c(n_samples, sequence_length, n_features))
+dates <- data$Date[(11:(nrow(data) + 1))]
+
+
+# Reshape the data into a 3D array
+for(i in 1:n_samples) {
+  cnn_input[i,,] <- as.matrix(scaled_features[i:(i + sequence_length - 1),])
+}
+
+# Now, cnn_input is ready to be used as an input for the CNN
+# It has the shape: (number of samples, sequence length, number of features)
+print(dim(cnn_input))
+
+
+# Prepare the output data (target variable)
+# Shift the closing price by one time step to create the target output
+cnn_output <- data$Close[(sequence_length + 1):nrow(data)]
+
+# Make sure the length of cnn_output matches the number of samples in cnn_input
+# The last value of 'Close' will not have a corresponding future value to predict, so we remove it
+cnn_output <- cnn_output[1:n_samples]
+
+# If the CNN model's output layer has one neuron, ensure the target is a matrix with one column
+cnn_output <- matrix(cnn_output, ncol = 1)
+print(length(cnn_output))  # Should match n_samples
+
+
+
+# Convert the list element 'Output' into a dataframe
+cnn_output <- data.frame(cnn_output)
+
+# Now add the 'dates' vector as a new column to the dataframe
+cnn_output$Date <- dates
+
+
+
+### check data 
+# Apply is.na() and is.infinite() to each element in the data frame
+na_or_inf <- sapply(data, function(x) is.na(x) | is.infinite(x))
+
+# Count the number of rows that have any NA or Inf
+count_rows_with_na_or_inf <- sum(rowSums(na_or_inf) > 0)
+
+# Print the result
+print(paste("Number of rows with NA or Inf:", count_rows_with_na_or_inf))
+
+
+# Check for NA, NaN, or Inf in each column
+columns_with_issues <- sapply(data, function(x) any(is.na(x) | is.infinite(x)))
+
+# Get names of columns with any NA, NaN, or Inf
+columns_names_with_issues <- names(data)[columns_with_issues]
+
+# Print the result
+print(columns_names_with_issues)
+
+
+# Identified columns with issues
+columns_with_issues <- c("CompanyId", "SMB", "HML", "MOM")
+
+# Count NA, NaN, or Inf in each identified column
+count_issues_per_column <- sapply(data[columns_with_issues], function(x) sum(is.na(x) | is.infinite(x)))
+
+# Print the counts
+print(count_issues_per_column)
+
+
+
+# Function to remove rows with any NaN values
+remove_NaN_rows <- function(input, output) {
+  nan_rows_input <- apply(is.na(input), c(1), any)
+  nan_rows_output <- is.na(output)
+  nan_rows <- nan_rows_input | nan_rows_output
+  
+  input_clean <- input[!nan_rows, , ]
+  output_clean <- output[!nan_rows]
+  
+  return(list("input_clean" = input_clean, "output_clean" = output_clean))
+}
+
+# Remove NaN values from cnn_input and cnn_output
+#clean_data <- remove_NaN_rows(cnn_input, cnn_output)
+#cnn_input <- clean_data$input_clean
+#cnn_output <- clean_data$output_clean
+
+
+# Function to check for NaN, Inf, or -Inf values in an array
+check_for_bad_values <- function(arr) {
+  nan_count <- sum(is.na(arr))
+  inf_count <- sum(arr == Inf)
+  neg_inf_count <- sum(arr == -Inf)
+  
+  return(list("NaN Count" = nan_count, "Inf Count" = inf_count, "-Inf Count" = neg_inf_count))
+}
+
+
+cnn_output <- na.omit(cnn_output)
+
+
+# Check for bad values in cnn_input
+input_check <- check_for_bad_values(cnn_input)
+print(input_check)
+
+# Check for bad values in cnn_output
+output_check <- check_for_bad_values(cnn_output)
+print(output_check)
+
+
+cnn_input<- cnn_input[1:1336810, , ]
+
+# Now cnn_output is ready to be used as the target for training the CNN
+
+# Save cnn_input
+
+save(cnn_input, file = "cnn_input17.5.2024.RData")
+save(cnn_output, file = "cnn_output17.5.2024.RData")
+
+# Load cnn_inputs
+load("cnn_input17.5.2024.RData")
+load("cnn_output17.5.2024.RData")
+
+# Now cnn_output is ready to be used as the target for training the CNN
+
+```
+
+
+
+```{r  }
+###model running testing 
+
+
+
+# Load cnn_input
+load("cnn_input17.5.2024.RData")
+load("cnn_output17.5.2024.RData")
+summary(cnn_input)
+data <- read.csv("titlonmoyinreadyfinalsubset 17.5.2024.csv")
+
+features <- data[, c("Close","SMB", "HML", "LIQ", "MOM", "MA5", "MA10", "MA20", "BIAS5", "BIAS10", "RSI6", "RSI12", 
+                     "Stoch_K", "Stoch_D", "MACD", "Signal", "WPR", "VOL1", "VOL2", "Delta_MA5")]
+# Prepare the data for the CNN
+#  use a sequence length of 'n' days for each prediction
+sequence_length <- 10 #   using the past 10 days to predict the next day
+n_features <- ncol(features)
+n_samples <- nrow(features) - sequence_length + 1
+
+library(keras)
+library(tidyverse)
+# Specify TensorFlow version
+#install_keras(tensorflow = "2.16.1")
+
+
+# Load necessary libraries
+library(quantmod)
+library(keras)
+library(data.table)
+library(tensorflow)
+#install.packages("tensorflo
+library(keras)
+
+# Adding 1D Convolutional layers with different kernel sizes as per the paper
+# Note that 'input_shape' is set according to  input data's dimensions (sequence_length, n_features)
+
+
+# Define the model
+model <- keras_model_sequential()
+
+ model2 <- keras_model_sequential() %>%
+  layer_conv_1d(
+    filters = 32,
+    kernel_size = 3,
+    activation = 'relu',
+    input_shape = c(sequence_length, n_features),
+    padding = "same",
+    kernel_regularizer = regularizer_l2(0.01),  # Adding L2 regularization
+    kernel_initializer = initializer_glorot_uniform()  # Changing the initializer
+  ) %>%
+  layer_max_pooling_1d(pool_size = 2, strides = 2) %>%
+  layer_conv_1d(
+    filters = 64,
+    kernel_size = 3,
+    activation = 'relu',
+    padding = "same",
+    kernel_regularizer = regularizer_l2(0.01),  # Adding L2 regularization to another layer
+    kernel_initializer = initializer_glorot_uniform()  # Applying initializer here as well
+  ) %>%
+  layer_max_pooling_1d(pool_size = 2, strides = 2) %>%
+  layer_flatten()
+
+
+
+model2 %>% compile(
+  loss = 'mse',  # Mean Squared Error for regression tasks
+  optimizer = optimizer_adam(learning_rate = 0.00005, clipnorm = 1),## learnin rate nesf kardam 0.0001 bood 
+  metrics = c('mean_absolute_error', 'accuracy')  # Combining metrics into one vector
+)
+
+# Print the model summary
+summary(model2)
+
+
+
+
+# Train the model
+history <- model2 %>% fit(
+  x = cnn_input,
+  y = cnn_output$cnn_output, 
+  epochs = 10,
+  batch_size = 32,
+  validation_split = 0.2
+)
+
+
+
+# Create a feature extraction model that outputs from the second convolutional layer
+
+feature_extractor <- keras_model(inputs = model2$input, outputs = get_layer(model2, index = 2)$output)
+
+# Now, use this model to predict features
+extracted_features <- predict(feature_extractor, cnn_input)
+
+
+# Saving the extracted features for later use
+saveRDS(extracted_features, file = "extracted_features_medel2.19.5.2024fama frenchfinalgetbetter pca.rds")
+
+# Plot training and validation loss
+plot(history)
+
+
+```
+
+
+
+```{r  }
+
+# Load the RDS file
+extracted_features <- readRDS("extracted_features_medel2.19.5.2024fama frenchfinalgetbetter pca.rds")
+
+
+
+
+# View the dimensions of the loaded features
+dim(extracted_features)
+
+# Check the summary statistics for the features
+summary(extracted_features)
+
+# If you want to see the first few rows to understand what the features look like
+head(extracted_features)
+
+
+
+
+
+######PCA TEST ###########
+
+
+
+
+# Flatten the array into a 2D matrix
+flattened_data <- array(extracted_features, dim = c(dim(extracted_features)[1], dim(extracted_features)[2] * dim(extracted_features)[3]))
+
+summary(flattened_data)## dataha too ranega an scaleled ok 
+
+summary(flattened_data)## dataha too ranega an scaleled ok 
+
+# Identify columns where all rows are zero
+columns_all_zeros <- apply(flattened_data, 2, function(x) all(x == 0))
+
+# Get the names of these columns (if the matrix has column names)
+columns_with_all_zeros <- names(columns_all_zeros)[columns_all_zeros]
+
+# Print the names of columns with all zeros
+print(columns_with_all_zeros)
+
+
+# Remove these columns from extracted_features
+flattened_data <- flattened_data[, !columns_all_zeros]
+
+# Display the dimensions of the cleaned extracted_features
+print(dim(flattened_data))
+
+
+# Step 1: Identify columns that contain at least one zero
+#columns_with_zeros <- apply(flattened_data, 2, function(x) any(x == 0))
+
+# Step 2: Filter out these columns from the matrix
+#flattened_data <- flattened_data[, !columns_with_zeros]
+
+# Show dimensions or summary of the filtered data
+#print(dim(filtered_data))
+#summary(filtered_data)
+
+
+
+library(stats)
+
+#
+pca <- prcomp(flattened_data, scale. = TRUE, center = TRUE)
+
+# Extracting the importance of components
+explained_variance <- summary(pca)$importance[2,]
+cumulative_variance <- cumsum(explained_variance)
+num_components <- which(cumulative_variance >= 0.999)[1]
+
+# Using the number of components to reduce dimensions
+reduced_data <- pca$x[, 1:num_components]
+
+summary(reduced_data)
+
+# Combine df1 and df2 side by side
+combined_df <- cbind(cnn_output, reduced_data)
+data <- rename(combined_df, c("close"= "cnn_output"  ))
+combined_df <- rename(combined_df, c("close"= "cnn_output"  ))
+
+# Display the combined data frame
+print(head(combined_df,100))
+
+
+write.csv(combined_df, file = "final.feature.feed_to_other_models19.05.2024better pca +++.csv", row.names = FALSE, na = "NA")
+
+
+save(reduced_data, file = "datatabnetwithpcafinal+19.5.2024.RData")
+
+
+
+
+```
+
+```{r  }
+
+
+#################################  pca histogrms
+
+
+
+
+# Load necessary libraries
+library(ggplot2)
+library(gridExtra)
+#install.packages("gridExtra")
+# Load  data
+# Load necessary libraries
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+
+# Load  data
+#data <- read.csv("final.feature.feed_to_other_models17.05.2024+++.csv")
+
+# List of PCA components
+pca_columns <- c( "close", "PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7")
+pca_columns <- c( "close")
+
+# Create a list to hold the plots
+plots <- list()
+
+# Generate histograms using tidy evaluation
+for (pca in pca_columns) {
+  p <- ggplot(data, aes(x = .data[[pca]])) +
+    geom_histogram(aes(y = ..density..), bins = 30, fill = "blue", alpha = 0.5) +
+    geom_density(color = "red", linewidth = 1) +
+    labs(title = paste("Distribution of", pca), x = pca, y = "Density")
+  plots[[pca]] <- p
+}
+
+# Arrange the plots in a grid
+do.call(grid.arrange, c(plots, ncol = 3))
+
+summary(data)
+
+#install.packages("DescTools")
+# Load necessary libraries
+library(DescTools)
+library(ggplot2)
+library(gridExtra)
+
+# Load  data
+#data <- read.csv("final.feature.feed_to_other_models17.05.2024+++.csv")
+
+# List of PCA components
+pca_columns <- c("PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7")
+
+# Apply winsorization to each PCA component
+for (pca in pca_columns) {
+  data[[pca]] <- Winsorize(data[[pca]], probs = c(0.05, 0.95))
+}
+
+# Create a list to hold the plots
+plots <- list()
+
+# Generate histograms using tidy evaluation
+for (pca in pca_columns) {
+  p <- ggplot(data, aes(x = .data[[pca]])) +
+    geom_histogram(aes(y = ..density..), bins = 30, fill = "blue", alpha = 0.5) +
+    geom_density(color = "red", linewidth = 1) +
+    labs(title = paste("Distribution of", pca), x = pca, y = "Density")
+  plots[[pca]] <- p
+}
+
+# Arrange the plots in a grid
+do.call(grid.arrange, c(plots, ncol = 3))
+
+
+
+
+# Load necessary libraries
+library(DescTools)
+library(dplyr)
+
+# Load  data
+#data <- read.csv("final.feature.feed_to_other_models17.05.2024+++.csv")
+
+# Ensure the date column is in datetime format
+data$Date <- as.Date(data$Date)
+
+# List of PCA components and other features to winsorize
+pca_columns <- c("PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7")
+
+# Store the number of rows before winsorization
+num_rows_before <- nrow(data)
+
+# Apply winsorization to each PCA component
+for (pca in pca_columns) {
+  data[[pca]] <- Winsorize(data[[pca]], probs = c(0.05, 0.95))
+}
+
+# Store the number of rows after winsorization
+num_rows_after <- nrow(data)
+
+# Print the number of rows before and after winsorization to verify they are the same
+cat("Number of rows before winsorization:", num_rows_before, "\n")
+cat("Number of rows after winsorization:", num_rows_after, "\n")
+
+
+
+
+# Function to check for NA, NaN, and infinite values in each column
+check_missing_values <- function(df) {
+  sapply(df, function(x) {
+    list(
+      `NA` = sum(is.na(x)),
+      `NaN` = sum(is.nan(x)),
+      `PosInf` = sum(is.infinite(x) & x > 0),
+      `NegInf` = sum(is.infinite(x) & x < 0)
+    )
+  })
+}
+
+# Check for missing values in the dataset
+missing_values_summary <- check_missing_values(data)
+print(missing_values_summary)
+
+
+# Save the updated data frame if needed
+write.csv(data, "winsorized_datapca final 18.5.2024.csv", row.names = FALSE)
+
+# Check the structure of the updated data
+str(data)
+
+
+########### close prices assessing 
+
+# Load necessary libraries
+library(dplyr)
+
+
+# Define the ranges
+ranges <- list(
+  "0-50" = c(0, 50),
+  "50-100" = c(50, 100),
+  "100-500" = c(100, 500),
+  "500-1000" = c(500, 1000),
+  "1000+" = c(1000, Inf)
+)
+
+# Function to calculate percentage of values in each range
+calculate_percentage <- function(data, column, ranges) {
+  total_count <- nrow(data)
+  percentages <- sapply(ranges, function(range) {
+    count <- sum(data[[column]] >= range[1] & data[[column]] < range[2])
+    percentage <- (count / total_count) * 100
+    return(percentage)
+  })
+  return(percentages)
+}
+
+# Calculate percentages for 'close' prices
+percentages <- calculate_percentage(data, "close", ranges)
+
+# Print the results
+percentages
+
+
+
+# Load necessary libraries
+library(ggplot2)
+
+# Define the ranges and percentages
+ranges <- c("0-50", "50-100", "100-500", "500-1000", "1000+")
+percentages <- c(62.02, 16.38, 20.46, 0.70, 0.44)
+
+# Create a data frame for plotting
+percentage_data <- data.frame(
+  Range = factor(ranges, levels = ranges),
+  Percentage = percentages
+)
+
+# Plot the histogram
+ggplot(percentage_data, aes(x = Range, y = Percentage)) +
+  geom_bar(stat = "identity", fill = "blue", alpha = 0.7) +
+  geom_text(aes(label = round(Percentage, 2)), vjust = -0.5, size = 4) +
+  labs(title = "Percentage of Close Prices in Different Ranges",
+       x = "Range",
+       y = "Percentage") +
+  theme_minimal()
+
+
+
+library(dplyr)
+library(DescTools)
+
+# Winsorize the 'close' column
+data$close <- Winsorize(data$close, probs = c(0.05, 0.95))
+
+# Check the summary of the winsorized 'close' column
+summary(data$close)
+
+# Plot distribution of winsorized 'close' prices
+ggplot(data, aes(x = close)) +
+  geom_histogram(aes(y = ..density..), bins = 30, fill = "blue", alpha = 0.5) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Distribution of Winsorized Close Prices", x = "Winsorized Close", y = "Density")
+
+ 
+ 
+# Save the updated data frame if needed
+write.csv(data, "winsorized_datapca and clsoe prices final 18.5.2024.csv", row.names = FALSE)
+
+```
+
+
